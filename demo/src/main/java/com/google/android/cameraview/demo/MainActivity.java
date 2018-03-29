@@ -17,39 +17,39 @@
 package com.google.android.cameraview.demo;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.Dialog;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.graphics.Matrix;
+import android.graphics.PixelFormat;
+import android.graphics.PointF;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.support.annotation.NonNull;
 import android.support.annotation.StringRes;
-import android.support.design.widget.FloatingActionButton;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.DialogFragment;
-import android.support.v4.app.FragmentManager;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.app.ActionBar;
 import android.support.v7.app.AlertDialog;
 import android.support.v7.app.AppCompatActivity;
-import android.support.v7.widget.Toolbar;
+import android.util.FloatMath;
 import android.util.Log;
-import android.view.Menu;
-import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
-import com.google.android.cameraview.AspectRatio;
 import com.google.android.cameraview.CameraView;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.util.Set;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.nio.charset.Charset;
 
 
 /**
@@ -57,8 +57,7 @@ import java.util.Set;
  * $ adb pull /sdcard/Android/data/com.google.android.cameraview.demo/files/Pictures/picture.jpg
  */
 public class MainActivity extends AppCompatActivity implements
-        ActivityCompat.OnRequestPermissionsResultCallback,
-        AspectRatioFragment.Listener {
+        ActivityCompat.OnRequestPermissionsResultCallback {
 
     private static final String TAG = "MainActivity";
 
@@ -66,61 +65,64 @@ public class MainActivity extends AppCompatActivity implements
 
     private static final String FRAGMENT_DIALOG = "dialog";
 
-    private static final int[] FLASH_OPTIONS = {
-            CameraView.FLASH_AUTO,
-            CameraView.FLASH_OFF,
-            CameraView.FLASH_ON,
-    };
-
-    private static final int[] FLASH_ICONS = {
-            R.drawable.ic_flash_auto,
-            R.drawable.ic_flash_off,
-            R.drawable.ic_flash_on,
-    };
-
-    private static final int[] FLASH_TITLES = {
-            R.string.flash_auto,
-            R.string.flash_off,
-            R.string.flash_on,
-    };
-
-    private int mCurrentFlash;
+    private FrameLayout mFrameLayout;
 
     private CameraView mCameraView;
 
     private Handler mBackgroundHandler;
 
-    private View.OnClickListener mOnClickListener = new View.OnClickListener() {
-        @Override
-        public void onClick(View v) {
-            switch (v.getId()) {
-                case R.id.take_picture:
-                    if (mCameraView != null) {
-                        mCameraView.takePicture();
-                    }
-                    break;
-            }
-        }
-    };
+    private MyGLSurfaceView2 mMyGLSurfaceView;
+
+    // The asset ID to download and display.
+    private static final String ASSET_ID = "2g_mmYRfLB9";
+
+    // The size we want to scale the asset to, for display. This size guarantees that no matter
+    // how big or small the asset is, we will scale it to a reasonable size for viewing.
+    private static final float ASSET_DISPLAY_SIZE = 5;
+
+    // Our background thread, which does all of the heavy lifting so we don't block the main thread.
+    private HandlerThread backgroundThread;
+
+    // Handler for the background thread, to which we post background thread tasks.
+    private Handler backgroundThreadHandler;
+
+    // The AsyncFileDownloader responsible for downloading a set of data files from Poly.
+    private AsyncFileDownloader fileDownloader;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         mCameraView = (CameraView) findViewById(R.id.camera);
+        mFrameLayout = (FrameLayout) findViewById(R.id.fl_container);
+        mMyGLSurfaceView = new MyGLSurfaceView2(this);
+        mMyGLSurfaceView.getHolder().setFormat(PixelFormat.TRANSLUCENT );
+        mFrameLayout.addView(mMyGLSurfaceView);
+
         if (mCameraView != null) {
             mCameraView.addCallback(mCallback);
         }
-        FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.take_picture);
-        if (fab != null) {
-            fab.setOnClickListener(mOnClickListener);
-        }
-        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
-        setSupportActionBar(toolbar);
-        ActionBar actionBar = getSupportActionBar();
-        if (actionBar != null) {
-            actionBar.setDisplayShowTitleEnabled(false);
-        }
+        backgroundThread = new HandlerThread("Worker");
+        backgroundThread.start();
+        backgroundThreadHandler = new Handler(backgroundThread.getLooper());
+
+        // Request the asset from the Poly API.
+        Log.d(TAG, "Requesting asset "+ ASSET_ID);
+        PolyApi.GetAsset(ASSET_ID, backgroundThreadHandler, new AsyncHttpRequest.CompletionListener() {
+            @Override
+            public void onHttpRequestSuccess(byte[] responseBody) {
+                // Successfully fetched asset information. This does NOT include the model's geometry,
+                // it's just the metadata. Let's parse it.
+                parseAsset(responseBody);
+            }
+            @Override
+            public void onHttpRequestFailure(int statusCode, String message, Exception exception) {
+                // Something went wrong with the request.
+                handleRequestFailure(statusCode, message, exception);
+            }
+        });
+
     }
 
     @Override
@@ -179,52 +181,6 @@ public class MainActivity extends AppCompatActivity implements
         }
     }
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        getMenuInflater().inflate(R.menu.main, menu);
-        return true;
-    }
-
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
-        switch (item.getItemId()) {
-            case R.id.aspect_ratio:
-                FragmentManager fragmentManager = getSupportFragmentManager();
-                if (mCameraView != null
-                        && fragmentManager.findFragmentByTag(FRAGMENT_DIALOG) == null) {
-                    final Set<AspectRatio> ratios = mCameraView.getSupportedAspectRatios();
-                    final AspectRatio currentRatio = mCameraView.getAspectRatio();
-                    AspectRatioFragment.newInstance(ratios, currentRatio)
-                            .show(fragmentManager, FRAGMENT_DIALOG);
-                }
-                return true;
-            case R.id.switch_flash:
-                if (mCameraView != null) {
-                    mCurrentFlash = (mCurrentFlash + 1) % FLASH_OPTIONS.length;
-                    item.setTitle(FLASH_TITLES[mCurrentFlash]);
-                    item.setIcon(FLASH_ICONS[mCurrentFlash]);
-                    mCameraView.setFlash(FLASH_OPTIONS[mCurrentFlash]);
-                }
-                return true;
-            case R.id.switch_camera:
-                if (mCameraView != null) {
-                    int facing = mCameraView.getFacing();
-                    mCameraView.setFacing(facing == CameraView.FACING_FRONT ?
-                            CameraView.FACING_BACK : CameraView.FACING_FRONT);
-                }
-                return true;
-        }
-        return super.onOptionsItemSelected(item);
-    }
-
-    @Override
-    public void onAspectRatioSelected(@NonNull AspectRatio ratio) {
-        if (mCameraView != null) {
-            Toast.makeText(this, ratio.toString(), Toast.LENGTH_SHORT).show();
-            mCameraView.setAspectRatio(ratio);
-        }
-    }
-
     private Handler getBackgroundHandler() {
         if (mBackgroundHandler == null) {
             HandlerThread thread = new HandlerThread("background");
@@ -249,32 +205,6 @@ public class MainActivity extends AppCompatActivity implements
 
         @Override
         public void onPictureTaken(CameraView cameraView, final byte[] data) {
-            Log.d(TAG, "onPictureTaken " + data.length);
-            Toast.makeText(cameraView.getContext(), R.string.picture_taken, Toast.LENGTH_SHORT)
-                    .show();
-            getBackgroundHandler().post(new Runnable() {
-                @Override
-                public void run() {
-                    File file = new File(getExternalFilesDir(Environment.DIRECTORY_PICTURES),
-                            "picture.jpg");
-                    OutputStream os = null;
-                    try {
-                        os = new FileOutputStream(file);
-                        os.write(data);
-                        os.close();
-                    } catch (IOException e) {
-                        Log.w(TAG, "Cannot write to " + file, e);
-                    } finally {
-                        if (os != null) {
-                            try {
-                                os.close();
-                            } catch (IOException e) {
-                                // Ignore
-                            }
-                        }
-                    }
-                }
-            });
         }
 
     };
@@ -330,4 +260,192 @@ public class MainActivity extends AppCompatActivity implements
 
     }
 
+    private void parseAsset(byte[] assetData) {
+        Log.d(TAG, "Got asset response (" + assetData.length + " bytes). Parsing.");
+        String assetBody = new String(assetData, Charset.forName("UTF-8"));
+        Log.d(TAG, assetBody);
+        try {
+            JSONObject response = new JSONObject(assetBody);
+
+            // Display attribution in a toast, for simplicity. In your app, you don't have to use a
+            // toast to do this. You can display it where it's most appropriate for your app.
+            setStatusMessageOnUiThread(response.getString("displayName") + " by " +
+                    response.getString("authorName"));
+
+            // The asset may have several formats (OBJ, GLTF, FBX, etc). We will look for the OBJ format.
+            JSONArray formats = response.getJSONArray("formats");
+            boolean foundObjFormat = false;
+            for (int i = 0; i < formats.length(); i++) {
+                JSONObject format = formats.getJSONObject(i);
+                if (format.getString("formatType").equals("OBJ")) {
+                    // Found the OBJ format. The format gives us the URL of the data files that we should
+                    // download (which include the OBJ file, the MTL file and the textures). We will now
+                    // request those files.
+                    requestDataFiles(format);
+                    foundObjFormat = true;
+                    break;
+                }
+            }
+            if (!foundObjFormat) {
+                // If this happens, it's because the asset doesn't have a representation in the OBJ
+                // format. Since this simple sample code can only parse OBJ, we can't proceed.
+                // But other formats might be available, so if your client supports multiple formats,
+                // you could still try a different format instead.
+                Log.e(TAG, "Could not find OBJ format in asset.");
+                return;
+            }
+        } catch (JSONException jsonException) {
+            Log.e(TAG, "JSON parsing error while processing response: " + jsonException);
+            jsonException.printStackTrace();
+            setStatusMessageOnUiThread("Failed to parse response.");
+        }
+    }
+
+    // Requests the data files for the OBJ format.
+    // NOTE: this runs on the background thread.
+    private void requestDataFiles(JSONObject objFormat) throws JSONException {
+        // objFormat has the list of data files for the OBJ format (OBJ file, MTL file, textures).
+        // We will use a AsyncFileDownloader to download all those files.
+        fileDownloader = new AsyncFileDownloader();
+
+        // The "root file" is the OBJ.
+        JSONObject rootFile = objFormat.getJSONObject("root");
+        fileDownloader.add(rootFile.getString("relativePath"), rootFile.getString("url"));
+
+        // The "resource files" are the MTL file and textures.
+        JSONArray resources = objFormat.getJSONArray("resources");
+        for (int i = 0; i < resources.length(); i++) {
+            JSONObject resourceFile = resources.getJSONObject(i);
+            String path = resourceFile.getString("relativePath");
+            String url = resourceFile.getString("url");
+            // For this example, we only care about OBJ and MTL files (not textures).
+            if (path.toLowerCase().endsWith(".obj") || path.toLowerCase().endsWith(".mtl")) {
+                fileDownloader.add(path, url);
+            }
+        }
+
+        // Now start downloading the data files. When this is done, the callback will call
+        // processDataFiles().
+        Log.d(TAG, "Starting to download data files, # files: " + fileDownloader.getEntryCount());
+        fileDownloader.start(backgroundThreadHandler, new AsyncFileDownloader.CompletionListener() {
+            @Override
+            public void onPolyDownloadFinished(AsyncFileDownloader downloader) {
+                if (downloader.isError()) {
+                    Log.e(TAG, "Failed to download data files for asset.");
+                    setStatusMessageOnUiThread("Failed to download data files.");
+                    return;
+                }
+                processDataFiles();
+            }
+        });
+    }
+
+    // NOTE: this runs on the background thread.
+    private void processDataFiles() {
+        Log.d(TAG, "All data files downloaded.");
+        // At this point, all the necessary data files are downloaded in fileDownloader, so what
+        // we have to do now is parse and convert those files to a format we can render.
+
+        ObjGeometry objGeometry = null;
+        MtlLibrary mtlLibrary = new MtlLibrary();
+
+        try {
+            for (int i = 0; i < fileDownloader.getEntryCount(); i++) {
+                AsyncFileDownloader.Entry entry = fileDownloader.getEntry(i);
+                Log.d(TAG, "Processing: " + entry.fileName + ", length:" + entry.contents.length);
+                String contents = new String(entry.contents, Charset.forName("UTF-8"));
+                if (entry.fileName.toLowerCase().endsWith(".obj")) {
+                    // It's the OBJ file.
+                    if (objGeometry != null) {
+                        // Shouldn't happen. There should only be one OBJ file.
+                        Log.w(TAG, "Package had more than one OBJ file. Ignoring.");
+                        continue;
+                    }
+                    objGeometry = ObjGeometry.parse(contents);
+                } else if (entry.fileName.toLowerCase().endsWith(".mtl")) {
+                    // There can be more than one MTL file. Just add the materials to our library.
+                    mtlLibrary.parseAndAdd(contents);
+                }
+            }
+
+            // We now have the OBJ file in objGeometry and the material library (MTL files) in mtlLibrary.
+            // Because OBJs can have any size and the geometry can be at any point that's not necessarily
+            // the origin, we apply a translation and scale to make sure it fits in a comfortable
+            // bounding box in order for us to display it.
+            ObjGeometry.Vec3 boundsCenter = objGeometry.getBoundsCenter();
+            ObjGeometry.Vec3 boundsSize = objGeometry.getBoundsSize();
+            float maxDimension = Math.max(boundsSize.x, Math.max(boundsSize.y, boundsSize.z));
+            float scale = ASSET_DISPLAY_SIZE / maxDimension;
+            ObjGeometry.Vec3 translation =
+                    new ObjGeometry.Vec3(-boundsCenter.x, -boundsCenter.y, -boundsCenter.z);
+            Log.d(TAG, "Will apply translation: " + translation + " and scale " + scale);
+
+            // Now let's generate the raw buffers that the GL thread will use for rendering.
+            RawObject rawObject = RawObject.convertObjAndMtl(objGeometry, mtlLibrary, translation, scale);
+
+            // Hand it over to the GL thread for rendering.
+            mMyGLSurfaceView.getRenderer().setRawObjectToRender(rawObject);
+
+            // Our job is done. From this point on the GL thread will pick up the raw object and
+            // properly create the OpenGL objects to represent it (IBOs, VBOs, etc).
+        } catch (ObjGeometry.ObjParseException objParseException) {
+            Log.e(TAG, "Error parsing OBJ file.");
+            objParseException.printStackTrace();
+            setStatusMessageOnUiThread("Failed to parse OBJ file.");
+        } catch (MtlLibrary.MtlParseException mtlParseException) {
+            Log.e(TAG, "Error parsing MTL file.");
+            mtlParseException.printStackTrace();
+            setStatusMessageOnUiThread("Failed to parse MTL file.");
+        }
+    }
+
+    // NOTE: this runs on the background thread.
+    private void handleRequestFailure(int statusCode, String message, Exception exception) {
+        // NOTE: because this is a simple sample, we don't have any real error handling logic
+        // other than just printing the error. In an actual app, this is where you would take
+        // appropriate action according to your app's use case. You could, for example, surface
+        // the error to the user or retry the request later.
+        Log.e(TAG, "Request failed. Status code " + statusCode + ", message: " + message +
+                ((exception != null) ? ", exception: " + exception : ""));
+        if (exception != null) exception.printStackTrace();
+        setStatusMessageOnUiThread("Request failed. See logs.");
+    }
+
+    // NOTE: this runs on the background thread.
+    private void setStatusMessageOnUiThread(final String statusMessage) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+            }
+        });
+    }
+
+
+
+    /** Show an event in the LogCat view, for debugging */
+    private void dumpEvent(MotionEvent event) {
+        String names[] = { "DOWN", "UP", "MOVE", "CANCEL", "OUTSIDE",
+                "POINTER_DOWN", "POINTER_UP", "7?", "8?", "9?" };
+        StringBuilder sb = new StringBuilder();
+        int action = event.getAction();
+        int actionCode = action & MotionEvent.ACTION_MASK;
+        sb.append("event ACTION_").append(names[actionCode]);
+        if (actionCode == MotionEvent.ACTION_POINTER_DOWN
+                || actionCode == MotionEvent.ACTION_POINTER_UP) {
+            sb.append("(pid ").append(
+                    action >> MotionEvent.ACTION_POINTER_ID_SHIFT);
+            sb.append(")");
+        }
+        sb.append("[");
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            sb.append("#").append(i);
+            sb.append("(pid ").append(event.getPointerId(i));
+            sb.append(")=").append((int) event.getX(i));
+            sb.append(",").append((int) event.getY(i));
+            if (i + 1 < event.getPointerCount())
+                sb.append(";");
+        }
+        sb.append("]");
+        Log.d(TAG, sb.toString());
+    }
 }

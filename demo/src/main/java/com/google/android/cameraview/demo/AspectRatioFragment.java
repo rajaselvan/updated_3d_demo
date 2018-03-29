@@ -116,15 +116,15 @@ public class AspectRatioFragment extends DialogFragment {
 
         @Override
         public View getView(int position, View view, ViewGroup parent) {
-            AspectRatioAdapter.ViewHolder holder;
+            ViewHolder holder;
             if (view == null) {
                 view = LayoutInflater.from(parent.getContext())
                         .inflate(android.R.layout.simple_list_item_1, parent, false);
-                holder = new AspectRatioAdapter.ViewHolder();
+                holder = new ViewHolder();
                 holder.text = (TextView) view.findViewById(android.R.id.text1);
                 view.setTag(holder);
             } else {
-                holder = (AspectRatioAdapter.ViewHolder) view.getTag();
+                holder = (ViewHolder) view.getTag();
             }
             AspectRatio ratio = getItem(position);
             StringBuilder sb = new StringBuilder(ratio.toString());
