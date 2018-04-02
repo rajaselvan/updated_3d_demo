@@ -29,6 +29,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.annotation.StringRes;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.DialogFragment;
@@ -49,6 +50,9 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 
 
@@ -71,10 +75,10 @@ public class MainActivity extends AppCompatActivity implements
 
     private Handler mBackgroundHandler;
 
-    private MyGLSurfaceView2 mMyGLSurfaceView;
+    private MyGLSurfaceView3 mMyGLSurfaceView;
 
     // The asset ID to download and display.
-    private static final String ASSET_ID = "2g_mmYRfLB9";
+    private static final String ASSET_ID = "evwJECBy7fi";
 
     // The size we want to scale the asset to, for display. This size guarantees that no matter
     // how big or small the asset is, we will scale it to a reasonable size for viewing.
@@ -89,6 +93,8 @@ public class MainActivity extends AppCompatActivity implements
     // The AsyncFileDownloader responsible for downloading a set of data files from Poly.
     private AsyncFileDownloader fileDownloader;
 
+    private ARDemoApp app;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,9 +102,7 @@ public class MainActivity extends AppCompatActivity implements
         setContentView(R.layout.activity_main);
         mCameraView = (CameraView) findViewById(R.id.camera);
         mFrameLayout = (FrameLayout) findViewById(R.id.fl_container);
-        mMyGLSurfaceView = new MyGLSurfaceView2(this);
-        mMyGLSurfaceView.getHolder().setFormat(PixelFormat.TRANSLUCENT );
-        mFrameLayout.addView(mMyGLSurfaceView);
+        app = ARDemoApp.getInstance();
 
         if (mCameraView != null) {
             mCameraView.addCallback(mCallback);
@@ -108,7 +112,7 @@ public class MainActivity extends AppCompatActivity implements
         backgroundThreadHandler = new Handler(backgroundThread.getLooper());
 
         // Request the asset from the Poly API.
-        Log.d(TAG, "Requesting asset "+ ASSET_ID);
+        Log.d(TAG, "Requesting asset " + ASSET_ID);
         PolyApi.GetAsset(ASSET_ID, backgroundThreadHandler, new AsyncHttpRequest.CompletionListener() {
             @Override
             public void onHttpRequestSuccess(byte[] responseBody) {
@@ -116,6 +120,7 @@ public class MainActivity extends AppCompatActivity implements
                 // it's just the metadata. Let's parse it.
                 parseAsset(responseBody);
             }
+
             @Override
             public void onHttpRequestFailure(int statusCode, String message, Exception exception) {
                 // Something went wrong with the request.
@@ -143,12 +148,9 @@ public class MainActivity extends AppCompatActivity implements
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA},
                     REQUEST_CAMERA_PERMISSION);
         }
-    }
-
-    @Override
-    protected void onPause() {
-        mCameraView.stop();
-        super.onPause();
+        if (mMyGLSurfaceView != null) {
+            mMyGLSurfaceView.onResume();
+        }
     }
 
     @Override
@@ -166,7 +168,7 @@ public class MainActivity extends AppCompatActivity implements
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
-            @NonNull int[] grantResults) {
+                                           @NonNull int[] grantResults) {
         switch (requestCode) {
             case REQUEST_CAMERA_PERMISSION:
                 if (permissions.length != 1 || grantResults.length != 1) {
@@ -217,7 +219,7 @@ public class MainActivity extends AppCompatActivity implements
         private static final String ARG_NOT_GRANTED_MESSAGE = "not_granted_message";
 
         public static ConfirmationDialogFragment newInstance(@StringRes int message,
-                String[] permissions, int requestCode, @StringRes int notGrantedMessage) {
+                                                             String[] permissions, int requestCode, @StringRes int notGrantedMessage) {
             ConfirmationDialogFragment fragment = new ConfirmationDialogFragment();
             Bundle args = new Bundle();
             args.putInt(ARG_MESSAGE, message);
@@ -346,8 +348,9 @@ public class MainActivity extends AppCompatActivity implements
         // At this point, all the necessary data files are downloaded in fileDownloader, so what
         // we have to do now is parse and convert those files to a format we can render.
 
-        ObjGeometry objGeometry = null;
+        Model model = null;
         MtlLibrary mtlLibrary = new MtlLibrary();
+        InputStream myInputStream = null;
 
         try {
             for (int i = 0; i < fileDownloader.getEntryCount(); i++) {
@@ -355,47 +358,24 @@ public class MainActivity extends AppCompatActivity implements
                 Log.d(TAG, "Processing: " + entry.fileName + ", length:" + entry.contents.length);
                 String contents = new String(entry.contents, Charset.forName("UTF-8"));
                 if (entry.fileName.toLowerCase().endsWith(".obj")) {
-                    // It's the OBJ file.
-                    if (objGeometry != null) {
-                        // Shouldn't happen. There should only be one OBJ file.
-                        Log.w(TAG, "Package had more than one OBJ file. Ignoring.");
-                        continue;
-                    }
-                    objGeometry = ObjGeometry.parse(contents);
+                    myInputStream = new ByteArrayInputStream(entry.contents);
                 } else if (entry.fileName.toLowerCase().endsWith(".mtl")) {
-                    // There can be more than one MTL file. Just add the materials to our library.
                     mtlLibrary.parseAndAdd(contents);
                 }
             }
 
-            // We now have the OBJ file in objGeometry and the material library (MTL files) in mtlLibrary.
-            // Because OBJs can have any size and the geometry can be at any point that's not necessarily
-            // the origin, we apply a translation and scale to make sure it fits in a comfortable
-            // bounding box in order for us to display it.
-            ObjGeometry.Vec3 boundsCenter = objGeometry.getBoundsCenter();
-            ObjGeometry.Vec3 boundsSize = objGeometry.getBoundsSize();
-            float maxDimension = Math.max(boundsSize.x, Math.max(boundsSize.y, boundsSize.z));
-            float scale = ASSET_DISPLAY_SIZE / maxDimension;
-            ObjGeometry.Vec3 translation =
-                    new ObjGeometry.Vec3(-boundsCenter.x, -boundsCenter.y, -boundsCenter.z);
-            Log.d(TAG, "Will apply translation: " + translation + " and scale " + scale);
+            if (myInputStream != null) {
+                model = new ObjModel(myInputStream, mtlLibrary);
+                setCurrentModel(model);
+            }
 
-            // Now let's generate the raw buffers that the GL thread will use for rendering.
-            RawObject rawObject = RawObject.convertObjAndMtl(objGeometry, mtlLibrary, translation, scale);
 
-            // Hand it over to the GL thread for rendering.
-            mMyGLSurfaceView.getRenderer().setRawObjectToRender(rawObject);
-
-            // Our job is done. From this point on the GL thread will pick up the raw object and
-            // properly create the OpenGL objects to represent it (IBOs, VBOs, etc).
-        } catch (ObjGeometry.ObjParseException objParseException) {
-            Log.e(TAG, "Error parsing OBJ file.");
-            objParseException.printStackTrace();
-            setStatusMessageOnUiThread("Failed to parse OBJ file.");
         } catch (MtlLibrary.MtlParseException mtlParseException) {
             Log.e(TAG, "Error parsing MTL file.");
             mtlParseException.printStackTrace();
             setStatusMessageOnUiThread("Failed to parse MTL file.");
+        }catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
@@ -420,32 +400,31 @@ public class MainActivity extends AppCompatActivity implements
         });
     }
 
+    private void setCurrentModel(@NonNull final Model model) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                createNewModelView(model);
+            }
+        });
+    }
+
+    private void createNewModelView(@Nullable Model model) {
+        if (mMyGLSurfaceView != null) {
+            mFrameLayout.removeView(mMyGLSurfaceView);
+        }
+        ARDemoApp.getInstance().setCurrentModel(model);
+        mMyGLSurfaceView = new MyGLSurfaceView3(this, model);
+        mFrameLayout.addView(mMyGLSurfaceView);
+    }
 
 
-    /** Show an event in the LogCat view, for debugging */
-    private void dumpEvent(MotionEvent event) {
-        String names[] = { "DOWN", "UP", "MOVE", "CANCEL", "OUTSIDE",
-                "POINTER_DOWN", "POINTER_UP", "7?", "8?", "9?" };
-        StringBuilder sb = new StringBuilder();
-        int action = event.getAction();
-        int actionCode = action & MotionEvent.ACTION_MASK;
-        sb.append("event ACTION_").append(names[actionCode]);
-        if (actionCode == MotionEvent.ACTION_POINTER_DOWN
-                || actionCode == MotionEvent.ACTION_POINTER_UP) {
-            sb.append("(pid ").append(
-                    action >> MotionEvent.ACTION_POINTER_ID_SHIFT);
-            sb.append(")");
+    @Override
+    protected void onPause() {
+        mCameraView.stop();
+        super.onPause();
+        if (mMyGLSurfaceView != null) {
+            mMyGLSurfaceView.onPause();
         }
-        sb.append("[");
-        for (int i = 0; i < event.getPointerCount(); i++) {
-            sb.append("#").append(i);
-            sb.append("(pid ").append(event.getPointerId(i));
-            sb.append(")=").append((int) event.getX(i));
-            sb.append(",").append((int) event.getY(i));
-            if (i + 1 < event.getPointerCount())
-                sb.append(";");
-        }
-        sb.append("]");
-        Log.d(TAG, sb.toString());
     }
 }

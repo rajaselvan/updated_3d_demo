@@ -237,28 +237,4 @@ public class MyGLRenderer2 implements GLSurfaceView.Renderer {
         Matrix.setIdentityM(scaleMatrix, 0);
         Matrix.scaleM(scaleMatrix, 0, mScale, mScale, mScale);
     }
-
-    public void updateOrientation()
-    {
-        SetPositionMatrix();
-        setScaleMatrix();
-
-        // Then Rotate object around Axis then translate
-        Matrix.multiplyMM(tmpMatrix, 0, projMatrix, 0, rotationMatrix, 0);
-        // Scale Object first
-        Matrix.multiplyMM(modelMatrix, 0, tmpMatrix, 0, scaleMatrix, 0);
-    }
-
-    private void addRotation(float angle)
-    {
-        mAngle += angle;
-
-        //rotateM(float[] m, int mOffset, float a, float x, float y, float z)
-        //Rotates matrix m in place by angle a (in degrees) around the axis (x, y, z)
-        Matrix.rotateM(rotationMatrix, 0,
-                angle,
-                0,
-                1,
-                0);
-    }
 }
